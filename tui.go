@@ -6,15 +6,16 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"fmt"
-	str "github.com/boyter/go-string"
-	"github.com/gdamore/tcell"
-	"github.com/rivo/tview"
 	"os"
 	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	str "github.com/boyter/go-string"
+	"github.com/gdamore/tcell/v2"
+	"github.com/rivo/tview"
 )
 
 type displayResult struct {
