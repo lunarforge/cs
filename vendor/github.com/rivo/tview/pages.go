@@ -1,7 +1,7 @@
 package tview
 
 import (
-	"github.com/gdamore/tcell"
+	"github.com/gdamore/tcell/v2"
 )
 
 // page represents one page of a Pages object.
@@ -12,9 +12,9 @@ type page struct {
 	Visible bool      // Whether or not this page is visible.
 }
 
-// Pages is a container for other primitives often used as the application's
-// root primitive. It allows to easily switch the visibility of the contained
-// primitives.
+// Pages is a container for other primitives laid out on top of each other,
+// overlapping or not. It is often used as the application's root primitive. It
+// allows to easily switch the visibility of the contained primitives.
 //
 // See https://github.com/rivo/tview/wiki/Pages for an example.
 type Pages struct {
@@ -37,7 +37,6 @@ func NewPages() *Pages {
 	p := &Pages{
 		Box: NewBox(),
 	}
-	p.focus = p
 	return p
 }
 
@@ -51,6 +50,18 @@ func (p *Pages) SetChangedFunc(handler func()) *Pages {
 // GetPageCount returns the number of pages currently stored in this object.
 func (p *Pages) GetPageCount() int {
 	return len(p.pages)
+}
+
+// GetPageNames returns all page names ordered from front to back,
+// optionally limited to visible pages.
+func (p *Pages) GetPageNames(visibleOnly bool) []string {
+	var names []string
+	for index := len(p.pages) - 1; index >= 0; index-- {
+		if !visibleOnly || p.pages[index].Visible {
+			names = append(names, p.pages[index].Name)
+		}
+	}
+	return names
 }
 
 // AddPage adds a new page with the given name and primitive. If there was
@@ -240,11 +251,11 @@ func (p *Pages) GetFrontPage() (name string, item Primitive) {
 // HasFocus returns whether or not this primitive has focus.
 func (p *Pages) HasFocus() bool {
 	for _, page := range p.pages {
-		if page.Item.GetFocusable().HasFocus() {
+		if page.Item.HasFocus() {
 			return true
 		}
 	}
-	return false
+	return p.Box.HasFocus()
 }
 
 // Focus is called by the application when the primitive receives focus.
@@ -261,12 +272,14 @@ func (p *Pages) Focus(delegate func(p Primitive)) {
 	}
 	if topItem != nil {
 		delegate(topItem)
+	} else {
+		p.Box.Focus(delegate)
 	}
 }
 
 // Draw draws this primitive onto the screen.
 func (p *Pages) Draw(screen tcell.Screen) {
-	p.Box.Draw(screen)
+	p.Box.DrawForSubclass(screen, p)
 	for _, page := range p.pages {
 		if !page.Visible {
 			continue
@@ -298,5 +311,33 @@ func (p *Pages) MouseHandler() func(action MouseAction, event *tcell.EventMouse,
 		}
 
 		return
+	})
+}
+
+// InputHandler returns the handler for this primitive.
+func (p *Pages) InputHandler() func(event *tcell.EventKey, setFocus func(p Primitive)) {
+	return p.WrapInputHandler(func(event *tcell.EventKey, setFocus func(p Primitive)) {
+		for _, page := range p.pages {
+			if page.Item.HasFocus() {
+				if handler := page.Item.InputHandler(); handler != nil {
+					handler(event, setFocus)
+					return
+				}
+			}
+		}
+	})
+}
+
+// PasteHandler returns the handler for this primitive.
+func (p *Pages) PasteHandler() func(pastedText string, setFocus func(p Primitive)) {
+	return p.WrapPasteHandler(func(pastedText string, setFocus func(p Primitive)) {
+		for _, page := range p.pages {
+			if page.Item.HasFocus() {
+				if handler := page.Item.PasteHandler(); handler != nil {
+					handler(pastedText, setFocus)
+					return
+				}
+			}
+		}
 	})
 }

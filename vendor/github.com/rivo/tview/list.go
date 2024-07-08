@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/gdamore/tcell"
+	"github.com/gdamore/tcell/v2"
 )
 
 // listItem represents one item in a List.
@@ -15,7 +15,24 @@ type listItem struct {
 	Selected      func() // The optional function which is called when the item is selected.
 }
 
-// List displays rows of items, each of which can be selected.
+// List displays rows of items, each of which can be selected. List items can be
+// shown as a single line or as two lines. They can be selected by pressing
+// their assigned shortcut key, navigating to them and pressing Enter, or
+// clicking on them with the mouse. The following key binds are available:
+//
+//   - Down arrow / tab: Move down one item.
+//   - Up arrow / backtab: Move up one item.
+//   - Home: Move to the first item.
+//   - End: Move to the last item.
+//   - Page down: Move down one page.
+//   - Page up: Move up one page.
+//   - Enter / Space: Select the current item.
+//   - Right / left: Scroll horizontally. Only if the list is wider than the
+//     available space.
+//
+// See [List.SetChangedFunc] for a way to be notified when the user navigates
+// to a list item. See [List.SetSelectedFunc] for a way to be notified when a
+// list item was selected.
 //
 // See https://github.com/rivo/tview/wiki/List for an example.
 type List struct {
@@ -30,20 +47,17 @@ type List struct {
 	// Whether or not to show the secondary item texts.
 	showSecondaryText bool
 
-	// The item main text color.
-	mainTextColor tcell.Color
+	// The item main text style.
+	mainTextStyle tcell.Style
 
-	// The item secondary text color.
-	secondaryTextColor tcell.Color
+	// The item secondary text style.
+	secondaryTextStyle tcell.Style
 
-	// The item shortcut text color.
-	shortcutColor tcell.Color
+	// The item shortcut text style.
+	shortcutStyle tcell.Style
 
-	// The text color for selected items.
-	selectedTextColor tcell.Color
-
-	// The background color for selected items.
-	selectedBackgroundColor tcell.Color
+	// The style for selected items.
+	selectedStyle tcell.Style
 
 	// If true, the selection is only shown when the list has focus.
 	selectedFocusOnly bool
@@ -54,11 +68,16 @@ type List struct {
 	// Whether or not navigating the list will wrap around.
 	wrapAround bool
 
-	// The number of list items skipped at the top before the first item is drawn.
-	offset int
+	// The number of list items skipped at the top before the first item is
+	// drawn.
+	itemOffset int
 
-	// An optional function which is called when the user has navigated to a list
-	// item.
+	// The number of cells skipped on the left side of an item text. Shortcuts
+	// are not affected.
+	horizontalOffset int
+
+	// An optional function which is called when the user has navigated to a
+	// list item.
 	changed func(index int, mainText, secondaryText string, shortcut rune)
 
 	// An optional function which is called when a list item was selected. This
@@ -69,17 +88,16 @@ type List struct {
 	done func()
 }
 
-// NewList returns a new form.
+// NewList returns a new list.
 func NewList() *List {
 	return &List{
-		Box:                     NewBox(),
-		showSecondaryText:       true,
-		wrapAround:              true,
-		mainTextColor:           Styles.PrimaryTextColor,
-		secondaryTextColor:      Styles.TertiaryTextColor,
-		shortcutColor:           Styles.SecondaryTextColor,
-		selectedTextColor:       Styles.PrimitiveBackgroundColor,
-		selectedBackgroundColor: Styles.PrimaryTextColor,
+		Box:                NewBox(),
+		showSecondaryText:  true,
+		wrapAround:         true,
+		mainTextStyle:      tcell.StyleDefault.Foreground(Styles.PrimaryTextColor).Background(Styles.PrimitiveBackgroundColor),
+		secondaryTextStyle: tcell.StyleDefault.Foreground(Styles.TertiaryTextColor).Background(Styles.PrimitiveBackgroundColor),
+		shortcutStyle:      tcell.StyleDefault.Foreground(Styles.SecondaryTextColor).Background(Styles.PrimitiveBackgroundColor),
+		selectedStyle:      tcell.StyleDefault.Foreground(Styles.PrimitiveBackgroundColor).Background(Styles.PrimaryTextColor),
 	}
 }
 
@@ -107,6 +125,8 @@ func (l *List) SetCurrentItem(index int) *List {
 
 	l.currentItem = index
 
+	l.adjustOffset()
+
 	return l
 }
 
@@ -116,6 +136,27 @@ func (l *List) GetCurrentItem() int {
 	return l.currentItem
 }
 
+// SetOffset sets the number of items to be skipped (vertically) as well as the
+// number of cells skipped horizontally when the list is drawn. Note that one
+// item corresponds to two rows when there are secondary texts. Shortcuts are
+// always drawn.
+//
+// These values may change when the list is drawn to ensure the currently
+// selected item is visible and item texts move out of view. Users can also
+// modify these values by interacting with the list.
+func (l *List) SetOffset(items, horizontal int) *List {
+	l.itemOffset = items
+	l.horizontalOffset = horizontal
+	return l
+}
+
+// GetOffset returns the number of items skipped while drawing, as well as the
+// number of cells item text is moved to the left. See also SetOffset() for more
+// information on these values.
+func (l *List) GetOffset() (int, int) {
+	return l.itemOffset, l.horizontalOffset
+}
+
 // RemoveItem removes the item with the given index (starting at 0) from the
 // list. If a negative index is provided, items are referred to from the back
 // (-1 = last item, -2 = second-to-last item, and so on). Out of range indices
@@ -123,7 +164,7 @@ func (l *List) GetCurrentItem() int {
 // always removed.
 //
 // The currently selected item is shifted accordingly. If it is the one that is
-// removed, a "changed" event is fired.
+// removed, a "changed" event is fired, unless no items are left.
 func (l *List) RemoveItem(index int) *List {
 	if len(l.items) == 0 {
 		return l
@@ -150,7 +191,7 @@ func (l *List) RemoveItem(index int) *List {
 
 	// Shift current item.
 	previousCurrentItem := l.currentItem
-	if l.currentItem >= index {
+	if l.currentItem > index || l.currentItem == len(l.items) {
 		l.currentItem--
 	}
 
@@ -165,31 +206,65 @@ func (l *List) RemoveItem(index int) *List {
 
 // SetMainTextColor sets the color of the items' main text.
 func (l *List) SetMainTextColor(color tcell.Color) *List {
-	l.mainTextColor = color
+	l.mainTextStyle = l.mainTextStyle.Foreground(color)
+	return l
+}
+
+// SetMainTextStyle sets the style of the items' main text. Note that the
+// background color is ignored in order not to override the background color of
+// the list itself.
+func (l *List) SetMainTextStyle(style tcell.Style) *List {
+	l.mainTextStyle = style
 	return l
 }
 
 // SetSecondaryTextColor sets the color of the items' secondary text.
 func (l *List) SetSecondaryTextColor(color tcell.Color) *List {
-	l.secondaryTextColor = color
+	l.secondaryTextStyle = l.secondaryTextStyle.Foreground(color)
+	return l
+}
+
+// SetSecondaryTextStyle sets the style of the items' secondary text. Note that
+// the background color is ignored in order not to override the background color
+// of the list itself.
+func (l *List) SetSecondaryTextStyle(style tcell.Style) *List {
+	l.secondaryTextStyle = style
 	return l
 }
 
 // SetShortcutColor sets the color of the items' shortcut.
 func (l *List) SetShortcutColor(color tcell.Color) *List {
-	l.shortcutColor = color
+	l.shortcutStyle = l.shortcutStyle.Foreground(color)
 	return l
 }
 
-// SetSelectedTextColor sets the text color of selected items.
+// SetShortcutStyle sets the style of the items' shortcut. Note that the
+// background color is ignored in order not to override the background color of
+// the list itself.
+func (l *List) SetShortcutStyle(style tcell.Style) *List {
+	l.shortcutStyle = style
+	return l
+}
+
+// SetSelectedTextColor sets the text color of selected items. Note that the
+// color of main text characters that are different from the main text color
+// (e.g. style tags) is maintained.
 func (l *List) SetSelectedTextColor(color tcell.Color) *List {
-	l.selectedTextColor = color
+	l.selectedStyle = l.selectedStyle.Foreground(color)
 	return l
 }
 
 // SetSelectedBackgroundColor sets the background color of selected items.
 func (l *List) SetSelectedBackgroundColor(color tcell.Color) *List {
-	l.selectedBackgroundColor = color
+	l.selectedStyle = l.selectedStyle.Background(color)
+	return l
+}
+
+// SetSelectedStyle sets the style of the selected items. Note that the color of
+// main text characters that are different from the main text color (e.g. color
+// tags) is maintained.
+func (l *List) SetSelectedStyle(style tcell.Style) *List {
+	l.selectedStyle = style
 	return l
 }
 
@@ -372,7 +447,7 @@ func (l *List) FindItems(mainSearch, secondarySearch string, mustContainBoth, ig
 		mainContained := strings.Contains(mainText, mainSearch)
 		secondaryContained := strings.Contains(secondaryText, secondarySearch)
 		if mustContainBoth && mainContained && secondaryContained ||
-			!mustContainBoth && (mainText != "" && mainContained || secondaryText != "" && secondaryContained) {
+			!mustContainBoth && (mainSearch != "" && mainContained || secondarySearch != "" && secondaryContained) {
 			indices = append(indices, index)
 		}
 	}
@@ -389,7 +464,7 @@ func (l *List) Clear() *List {
 
 // Draw draws this primitive onto the screen.
 func (l *List) Draw(screen tcell.Screen) {
-	l.Box.Draw(screen)
+	l.Box.DrawForSubclass(screen, l)
 
 	// Determine the dimensions.
 	x, y, width, height := l.GetInnerRect()
@@ -410,22 +485,14 @@ func (l *List) Draw(screen tcell.Screen) {
 		}
 	}
 
-	// Adjust offset to keep the current selection in view.
-	if l.currentItem < l.offset {
-		l.offset = l.currentItem
-	} else if l.showSecondaryText {
-		if 2*(l.currentItem-l.offset) >= height-1 {
-			l.offset = (2*l.currentItem + 3 - height) / 2
-		}
-	} else {
-		if l.currentItem-l.offset >= height {
-			l.offset = l.currentItem + 1 - height
-		}
+	if l.horizontalOffset < 0 {
+		l.horizontalOffset = 0
 	}
 
 	// Draw the list items.
+	var maxWidth int // The maximum printed item width.
 	for index, item := range l.items {
-		if index < l.offset {
+		if index < l.itemOffset {
 			continue
 		}
 
@@ -435,42 +502,67 @@ func (l *List) Draw(screen tcell.Screen) {
 
 		// Shortcuts.
 		if showShortcuts && item.Shortcut != 0 {
-			Print(screen, fmt.Sprintf("(%s)", string(item.Shortcut)), x-5, y, 4, AlignRight, l.shortcutColor)
+			printWithStyle(screen, fmt.Sprintf("(%s)", string(item.Shortcut)), x-5, y, 0, 4, AlignRight, l.shortcutStyle, false)
 		}
 
 		// Main text.
-		Print(screen, item.MainText, x, y, width, AlignLeft, l.mainTextColor)
+		selected := index == l.currentItem && (!l.selectedFocusOnly || l.HasFocus())
+		style := l.mainTextStyle
+		if selected {
+			style = l.selectedStyle
+		}
+		_, _, printedWidth := printWithStyle(screen, item.MainText, x, y, l.horizontalOffset, width, AlignLeft, style, false)
+		if printedWidth > maxWidth {
+			maxWidth = printedWidth
+		}
 
-		// Background color of selected text.
-		if index == l.currentItem && (!l.selectedFocusOnly || l.HasFocus()) {
-			textWidth := width
-			if !l.highlightFullLine {
-				if w := TaggedStringWidth(item.MainText); w < textWidth {
-					textWidth = w
-				}
-			}
-
-			for bx := 0; bx < textWidth; bx++ {
-				m, c, style, _ := screen.GetContent(x+bx, y)
-				fg, _, _ := style.Decompose()
-				if fg == l.mainTextColor {
-					fg = l.selectedTextColor
-				}
-				style = style.Background(l.selectedBackgroundColor).Foreground(fg)
-				screen.SetContent(x+bx, y, m, c, style)
+		// Draw until the end of the line if requested.
+		if selected && l.highlightFullLine {
+			for bx := printedWidth; bx < width; bx++ {
+				screen.SetContent(x+bx, y, ' ', nil, style)
 			}
 		}
 
 		y++
-
 		if y >= bottomLimit {
 			break
 		}
 
 		// Secondary text.
 		if l.showSecondaryText {
-			Print(screen, item.SecondaryText, x, y, width, AlignLeft, l.secondaryTextColor)
+			_, _, printedWidth := printWithStyle(screen, item.SecondaryText, x, y, l.horizontalOffset, width, AlignLeft, l.secondaryTextStyle, false)
+			if printedWidth > maxWidth {
+				maxWidth = printedWidth
+			}
 			y++
+		}
+	}
+
+	// We don't want the item text to get out of view. If the horizontal offset
+	// is too high, we reset it and redraw. (That should be about as efficient
+	// as calculating everything up front.)
+	if l.horizontalOffset > 0 && maxWidth < width {
+		l.horizontalOffset -= width - maxWidth
+		l.Draw(screen)
+	}
+}
+
+// adjustOffset adjusts the vertical offset to keep the current selection in
+// view.
+func (l *List) adjustOffset() {
+	_, _, _, height := l.GetInnerRect()
+	if height == 0 {
+		return
+	}
+	if l.currentItem < l.itemOffset {
+		l.itemOffset = l.currentItem
+	} else if l.showSecondaryText {
+		if 2*(l.currentItem-l.itemOffset) >= height-1 {
+			l.itemOffset = (2*l.currentItem + 3 - height) / 2
+		}
+	} else {
+		if l.currentItem-l.itemOffset >= height {
+			l.itemOffset = l.currentItem + 1 - height
 		}
 	}
 }
@@ -490,10 +582,14 @@ func (l *List) InputHandler() func(event *tcell.EventKey, setFocus func(p Primit
 		previousItem := l.currentItem
 
 		switch key := event.Key(); key {
-		case tcell.KeyTab, tcell.KeyDown, tcell.KeyRight:
+		case tcell.KeyTab, tcell.KeyDown:
 			l.currentItem++
-		case tcell.KeyBacktab, tcell.KeyUp, tcell.KeyLeft:
+		case tcell.KeyBacktab, tcell.KeyUp:
 			l.currentItem--
+		case tcell.KeyRight:
+			l.horizontalOffset += 2 // We shift by 2 to account for two-cell characters.
+		case tcell.KeyLeft:
+			l.horizontalOffset -= 2
 		case tcell.KeyHome:
 			l.currentItem = 0
 		case tcell.KeyEnd:
@@ -501,9 +597,15 @@ func (l *List) InputHandler() func(event *tcell.EventKey, setFocus func(p Primit
 		case tcell.KeyPgDn:
 			_, _, _, height := l.GetInnerRect()
 			l.currentItem += height
+			if l.currentItem >= len(l.items) {
+				l.currentItem = len(l.items) - 1
+			}
 		case tcell.KeyPgUp:
 			_, _, _, height := l.GetInnerRect()
 			l.currentItem -= height
+			if l.currentItem < 0 {
+				l.currentItem = 0
+			}
 		case tcell.KeyEnter:
 			if l.currentItem >= 0 && l.currentItem < len(l.items) {
 				item := l.items[l.currentItem]
@@ -554,9 +656,12 @@ func (l *List) InputHandler() func(event *tcell.EventKey, setFocus func(p Primit
 			}
 		}
 
-		if l.currentItem != previousItem && l.currentItem < len(l.items) && l.changed != nil {
-			item := l.items[l.currentItem]
-			l.changed(l.currentItem, item.MainText, item.SecondaryText, item.Shortcut)
+		if l.currentItem != previousItem && l.currentItem < len(l.items) {
+			if l.changed != nil {
+				item := l.items[l.currentItem]
+				l.changed(l.currentItem, item.MainText, item.SecondaryText, item.Shortcut)
+			}
+			l.adjustOffset()
 		}
 	})
 }
@@ -573,7 +678,7 @@ func (l *List) indexAtPoint(x, y int) int {
 	if l.showSecondaryText {
 		index /= 2
 	}
-	index += l.offset
+	index += l.itemOffset
 
 	if index >= len(l.items) {
 		return -1
@@ -601,25 +706,34 @@ func (l *List) MouseHandler() func(action MouseAction, event *tcell.EventMouse, 
 				if l.selected != nil {
 					l.selected(index, item.MainText, item.SecondaryText, item.Shortcut)
 				}
-				if index != l.currentItem && l.changed != nil {
-					l.changed(index, item.MainText, item.SecondaryText, item.Shortcut)
+				if index != l.currentItem {
+					if l.changed != nil {
+						l.changed(index, item.MainText, item.SecondaryText, item.Shortcut)
+					}
+					l.adjustOffset()
 				}
 				l.currentItem = index
 			}
 			consumed = true
 		case MouseScrollUp:
-			if l.offset > 0 {
-				l.offset--
+			if l.itemOffset > 0 {
+				l.itemOffset--
 			}
 			consumed = true
 		case MouseScrollDown:
-			lines := len(l.items) - l.offset
+			lines := len(l.items) - l.itemOffset
 			if l.showSecondaryText {
 				lines *= 2
 			}
 			if _, _, _, height := l.GetInnerRect(); lines > height {
-				l.offset++
+				l.itemOffset++
 			}
+			consumed = true
+		case MouseScrollLeft:
+			l.horizontalOffset--
+			consumed = true
+		case MouseScrollRight:
+			l.horizontalOffset++
 			consumed = true
 		}
 
